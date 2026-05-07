@@ -1,9 +1,16 @@
 const path = require("path");
+const fs = require("fs");
 const qrcode = require("qrcode");
 const { Client, LocalAuth } = require("whatsapp-web.js");
 
-const SESSION_PATH = path.join(__dirname, "..", ".wwebjs_auth");
+const SESSION_PATH = process.env.WHATSAPP_SESSION_PATH
+  ? path.resolve(process.env.WHATSAPP_SESSION_PATH)
+  : path.join(__dirname, "..", ".wwebjs_auth");
 const CLIENT_ID = process.env.WHATSAPP_CLIENT_ID || "y-store";
+const AUTO_INIT = process.env.WHATSAPP_AUTO_INIT !== "false";
+const RECONNECT_DELAY_MS = Number(process.env.WHATSAPP_RECONNECT_DELAY_MS || 15000);
+const MAX_RECONNECT_DELAY_MS = Number(process.env.WHATSAPP_MAX_RECONNECT_DELAY_MS || 120000);
+const READY_WAIT_TIMEOUT_MS = Number(process.env.WHATSAPP_READY_WAIT_TIMEOUT_MS || 20000);
 
 let client = null;
 let initializingPromise = null;
@@ -13,6 +20,47 @@ let latestError = null;
 let connectionStatus = "idle";
 let authenticated = false;
 let connectedNumber = null;
+let reconnectTimer = null;
+let reconnectAttempts = 0;
+let manualLogout = false;
+
+function ensureSessionPath() {
+  fs.mkdirSync(SESSION_PATH, { recursive: true });
+}
+
+function clearReconnectTimer() {
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+}
+
+function getReconnectDelay() {
+  const delay = RECONNECT_DELAY_MS * Math.max(1, reconnectAttempts);
+  return Math.min(delay, MAX_RECONNECT_DELAY_MS);
+}
+
+function scheduleReconnect(reason = "unknown") {
+  if (!AUTO_INIT || manualLogout || initializingPromise || client) {
+    return;
+  }
+
+  clearReconnectTimer();
+  reconnectAttempts += 1;
+  const delay = getReconnectDelay();
+  connectionStatus = "reconnecting";
+  latestError = `Reconnecting after disconnect: ${reason}`;
+
+  reconnectTimer = setTimeout(async () => {
+    reconnectTimer = null;
+    try {
+      await initWhatsAppClient();
+    } catch (error) {
+      latestError = error.message || String(error);
+      scheduleReconnect(latestError);
+    }
+  }, delay);
+}
 
 function normalizeWhatsAppPhone(phone = "") {
   let value = String(phone).trim();
@@ -44,6 +92,29 @@ function getStatus() {
   };
 }
 
+function waitForClientReady(timeoutMs = READY_WAIT_TIMEOUT_MS) {
+  if (client && connectionStatus === "ready") {
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve, reject) => {
+    const startedAt = Date.now();
+
+    const timer = setInterval(() => {
+      if (client && connectionStatus === "ready") {
+        clearInterval(timer);
+        resolve();
+        return;
+      }
+
+      if (Date.now() - startedAt >= timeoutMs) {
+        clearInterval(timer);
+        reject(new Error("WhatsApp client is not ready yet. Wait a few seconds and try again."));
+      }
+    }, 500);
+  });
+}
+
 async function buildQrImage(qrText) {
   latestQrText = qrText;
   latestQrImage = await qrcode.toDataURL(qrText);
@@ -51,6 +122,7 @@ async function buildQrImage(qrText) {
 
 function bindClientEvents(instance) {
   instance.on("qr", async (qrText) => {
+    clearReconnectTimer();
     connectionStatus = "qr_ready";
     latestError = null;
     connectedNumber = null;
@@ -64,12 +136,16 @@ function bindClientEvents(instance) {
   });
 
   instance.on("authenticated", () => {
+    clearReconnectTimer();
+    reconnectAttempts = 0;
     authenticated = true;
     latestError = null;
     connectionStatus = "authenticated";
   });
 
   instance.on("ready", () => {
+    clearReconnectTimer();
+    reconnectAttempts = 0;
     connectionStatus = "ready";
     latestQrText = null;
     latestQrImage = null;
@@ -84,6 +160,7 @@ function bindClientEvents(instance) {
   });
 
   instance.on("auth_failure", (message) => {
+    clearReconnectTimer();
     authenticated = false;
     connectionStatus = "auth_failure";
     latestError = message || "Authentication failed";
@@ -98,6 +175,10 @@ function bindClientEvents(instance) {
     connectedNumber = null;
     client = null;
     initializingPromise = null;
+
+    if (!manualLogout) {
+      scheduleReconnect(reason || "Client disconnected");
+    }
   });
 }
 
@@ -113,6 +194,9 @@ async function initWhatsAppClient() {
 
   connectionStatus = "initializing";
   latestError = null;
+  manualLogout = false;
+  clearReconnectTimer();
+  ensureSessionPath();
 
   client = new Client({
     authStrategy: new LocalAuth({
@@ -132,6 +216,7 @@ async function initWhatsAppClient() {
       latestError = error.message;
       connectionStatus = "failed";
       client = null;
+      scheduleReconnect(error.message);
       throw error;
     })
     .finally(() => {
@@ -142,9 +227,22 @@ async function initWhatsAppClient() {
   return getStatus();
 }
 
-function ensureClientReady() {
+async function ensureClientReady() {
+  if (!client && AUTO_INIT && !initializingPromise) {
+    try {
+      await initWhatsAppClient();
+    } catch (_) {
+    }
+  }
+
+  if (client && connectionStatus === "ready") {
+    return;
+  }
+
+  await waitForClientReady();
+
   if (!client || connectionStatus !== "ready") {
-    throw new Error("WhatsApp client is not ready. Scan QR and wait until status becomes ready.");
+    throw new Error("WhatsApp client is not ready yet. Wait a few seconds and try again.");
   }
 }
 
@@ -157,6 +255,9 @@ async function getQrCode() {
 }
 
 async function logoutWhatsApp() {
+  manualLogout = true;
+  clearReconnectTimer();
+
   if (!client) {
     connectionStatus = "idle";
     authenticated = false;
@@ -188,8 +289,16 @@ async function logoutWhatsApp() {
   return { success: true, status: connectionStatus };
 }
 
+function startWhatsAppAutoInit() {
+  if (!AUTO_INIT) {
+    return;
+  }
+
+  scheduleReconnect("server_boot");
+}
+
 async function resolveChatId(phone) {
-  ensureClientReady();
+  await ensureClientReady();
 
   const normalizedPhone = normalizeWhatsAppPhone(phone);
   const numberId = await client.getNumberId(normalizedPhone);
@@ -227,4 +336,5 @@ module.exports = {
   logoutWhatsApp,
   normalizeWhatsAppPhone,
   sendWhatsAppText,
+  startWhatsAppAutoInit,
 };

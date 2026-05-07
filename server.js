@@ -18,6 +18,7 @@ const subscriptionsRouter = require("./routes/subscriptions");
 const followsRouter = require("./routes/follows");
 const ratingsRouter = require("./routes/ratings");
 const { sendSubscriptionExpiryReminders } = require("./services/subscriptionReminders");
+const { startWhatsAppAutoInit } = require("./services/waSender");
 
 const SUBSCRIPTION_REMINDER_INTERVAL_MS = 12 * 60 * 60 * 1000;
 
@@ -31,6 +32,8 @@ sequelize.sync({ alter: true })
     } catch (error) {
       console.error("Error sending startup subscription reminders:", error.message);
     }
+
+    startWhatsAppAutoInit();
   })
   .catch((err) => {
     console.error("Error syncing database:", err);
