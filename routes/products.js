@@ -300,30 +300,56 @@ function paginateArray(items, page, limit) {
   };
 }
 
-router.get("/search/products", async (req, res) => {
+async function searchProductsHandler(req, res) {
   try {
     const query = String(req.query.q || "").trim();
-    const limit = Math.min(parseInt(req.query.limit, 10) || 20, 50);
+    const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 20, 1), 50);
+    const minPrice = req.query.minPrice === undefined || req.query.minPrice === "" ? null : Number(req.query.minPrice);
+    const maxPrice = req.query.maxPrice === undefined || req.query.maxPrice === "" ? null : Number(req.query.maxPrice);
+    const location = String(req.query.location || "").trim();
+    const hasDiscount = String(req.query.hasDiscount || "").trim() === "true";
+    const categoryId = req.query.categoryId === undefined || req.query.categoryId === "" ? null : Number(req.query.categoryId);
+    const sort = String(req.query.sort || "newest").trim();
+    const userId = parseInt(req.query.userId, 10) || 0;
 
-    if (query.length < 2) {
+    if (query.length > 0 && query.length < 2) {
       return res.status(400).json({ error: "يجب أن يكون البحث من حرفين على الأقل" });
     }
 
     const products = await Product.findAll({
       where: {
-        [Op.or]: [
-          { title: { [Op.like]: `%${query}%` } },
-          { description: { [Op.like]: `%${query}%` } },
-        ],
+        ...(query
+          ? {
+              [Op.or]: [
+                { title: { [Op.like]: `%${query}%` } },
+                { description: { [Op.like]: `%${query}%` } },
+              ],
+            }
+          : {}),
+        ...(hasDiscount ? { discountType: { [Op.ne]: "none" } } : {}),
+        ...(categoryId ? { categoryId } : {}),
       },
       include: [
         {
           model: User,
           as: "seller",
-          attributes: ["id", "name", "phone", "location", "role", "isVerified", "image"],
+          attributes: ["id", "name", "phone", "location", "role", "isVerified", "image", "storeActive"],
+          where: {
+            role: "agent",
+            storeActive: true,
+            ...(location ? { location } : {}),
+          },
+        },
+        {
+          model: User,
+          as: "favoritedByUsers",
+          where: { id: userId },
+          required: false,
+          attributes: ["id"],
+          through: { attributes: [] },
         },
       ],
-      limit,
       order: [["createdAt", "DESC"]],
     });
 
@@ -331,23 +357,57 @@ router.get("/search/products", async (req, res) => {
     const followersCountMap = await getFollowersCountMap(sellerIds);
     const ratingsSummaryMap = await getSellerRatingsSummaryMap(sellerIds);
 
+    const enrichedProducts = products.map((product) => {
+      const productJson = product.toJSON();
+      productJson.isFavorite = product.favoritedByUsers && product.favoritedByUsers.length > 0;
+      delete productJson.favoritedByUsers;
+      return attachDiscountDetails(
+        attachRatingsToSeller(
+          attachFollowersCountToSeller(productJson, followersCountMap),
+          ratingsSummaryMap
+        )
+      );
+    }).filter((product) => {
+      const finalPrice = Number(product.finalPrice ?? product.price ?? 0);
+      if (minPrice !== null && Number.isFinite(minPrice) && finalPrice < minPrice) return false;
+      if (maxPrice !== null && Number.isFinite(maxPrice) && finalPrice > maxPrice) return false;
+      return true;
+    });
+
+    enrichedProducts.sort((a, b) => {
+      switch (sort) {
+        case "price_asc":
+          return Number(a.finalPrice ?? a.price ?? 0) - Number(b.finalPrice ?? b.price ?? 0);
+        case "price_desc":
+          return Number(b.finalPrice ?? b.price ?? 0) - Number(a.finalPrice ?? a.price ?? 0);
+        case "rating_desc":
+          return Number(b.seller?.ratingAverage || 0) - Number(a.seller?.ratingAverage || 0);
+        case "followers_desc":
+          return Number(b.seller?.followersCount || 0) - Number(a.seller?.followersCount || 0);
+        case "oldest":
+          return new Date(a.createdAt) - new Date(b.createdAt);
+        case "newest":
+        default:
+          return new Date(b.createdAt) - new Date(a.createdAt);
+      }
+    });
+
+    const pageData = paginateArray(enrichedProducts, page, limit);
+
     return res.status(200).json({
       query,
-      count: products.length,
-      products: products.map((product) =>
-        attachDiscountDetails(
-          attachRatingsToSeller(
-            attachFollowersCountToSeller(product.toJSON(), followersCountMap),
-            ratingsSummaryMap
-          )
-        )
-      ),
+      filters: { minPrice, maxPrice, location, hasDiscount, categoryId, sort },
+      count: pageData.totalItems,
+      ...pageData,
     });
   } catch (error) {
     console.error("❌ Error searching products:", error.message);
     return res.status(500).json({ error: "Internal Server Error" });
   }
-});
+}
+
+router.get("/search/products", searchProductsHandler);
+router.get("/products/search", searchProductsHandler);
 
 router.get("/discover/top-selling", async (req, res) => {
   try {
