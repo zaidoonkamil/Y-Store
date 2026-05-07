@@ -467,18 +467,27 @@ router.get("/discover/discounted", async (req, res) => {
 
 router.get("/discover/featured-stores", async (req, res) => {
   try {
-    const sellers = await User.findAll({
+    const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || DISCOVERY_LIMIT, 1), 40);
+    const offset = (page - 1) * limit;
+
+    const { count, rows: sellers } = await User.findAndCountAll({
       where: {
         role: "agent",
         storeActive: true,
         isFeaturedSeller: true,
       },
+      limit,
+      offset,
       order: [["createdAt", "DESC"]],
     });
 
     const enrichedSellers = await enrichSellers(sellers);
 
     return res.status(200).json({
+      totalItems: count,
+      totalPages: Math.max(1, Math.ceil(count / limit)),
+      currentPage: page,
       sellers: enrichedSellers,
     });
   } catch (error) {
