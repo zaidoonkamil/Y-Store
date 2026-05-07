@@ -422,6 +422,58 @@ router.post("/reset-password", upload.none(), async (req, res) => {
   }
 });
 
+router.post("/admin/agents", requireAdmin, uploadImage.array("images", 5), async (req, res) => {
+  const { name, location, password } = req.body;
+  let { phone } = req.body;
+
+  try {
+    phone = normalizePhone(phone);
+    const normalizedLocation = normalizeGovernorate(location);
+
+    if (!name || !phone || !location || !password) {
+      return res.status(400).json({ error: "name, phone, location and password are required" });
+    }
+
+    if (!req.files || req.files.length === 0) {
+      return res.status(400).json({ error: "يجب رفع صورة للتاجر" });
+    }
+
+    if (!isValidIraqiGovernorate(normalizedLocation)) {
+      return res.status(400).json({
+        error: "location must be one of the 19 Iraqi governorates",
+        allowedLocations: IRAQI_GOVERNORATES,
+      });
+    }
+
+    const existingPhone = await User.findOne({ where: { phone } });
+    if (existingPhone) {
+      return res.status(400).json({ error: "Phone already exists" });
+    }
+
+    const hashedPassword = await bcrypt.hash(password, saltRounds);
+    const images = req.files.map((file) => file.filename);
+
+    const agent = await User.create({
+      name,
+      phone,
+      location: normalizedLocation,
+      password: hashedPassword,
+      role: "agent",
+      isVerified: true,
+      storeActive: false,
+      image: images[0],
+    });
+
+    return res.status(201).json({
+      message: "Agent account created successfully",
+      user: serializeUserWithStats(agent),
+    });
+  } catch (error) {
+    console.error("❌ Error creating admin agent:", error.message);
+    return res.status(500).json({ error: error.message || "Internal Server Error" });
+  }
+});
+
 router.post("/users", uploadImage.array("images", 5), async (req, res) => {
   const { name, location, password, role = "user" } = req.body;
   let { phone } = req.body;
