@@ -3,7 +3,7 @@ const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
 const multer = require("multer");
 const { Op } = require("sequelize");
-const { User, UserDevice, SellerFollow } = require("../models");
+const { User, UserDevice, SellerFollow, Order } = require("../models");
 const OtpCode = require("../models/OtpCode");
 const uploadImage = require("../middlewares/uploads");
 const { sendWhatsAppText } = require("../services/waSender");
@@ -760,6 +760,58 @@ router.get("/delivery-companies", async (req, res) => {
     });
   } catch (error) {
     console.error("❌ Error fetching delivery companies:", error.message);
+    return res.status(500).json({ error: "Internal Server Error" });
+  }
+});
+
+router.get("/admin/delivery-companies/stats", requireAdmin, async (req, res) => {
+  try {
+    const companies = await User.findAll({
+      where: { role: DELIVERY_COMPANY_ROLE },
+      order: [["createdAt", "DESC"]],
+    });
+
+    const statuses = ["قيد الانتضار", "قيد التوصيل", "مكتمل", "ملغي"];
+    const companiesWithStats = await Promise.all(
+      companies.map(async (company) => {
+        const statusCounts = {};
+        for (const status of statuses) {
+          statusCounts[status] = await Order.count({
+            where: { deliveryCompanyId: company.id, status },
+          });
+        }
+
+        const totalOrders = statuses.reduce((sum, status) => sum + statusCounts[status], 0);
+        return {
+          ...serializeUser(company),
+          stats: {
+            totalOrders,
+            pending: statusCounts["قيد الانتضار"] || 0,
+            delivery: statusCounts["قيد التوصيل"] || 0,
+            completed: statusCounts["مكتمل"] || 0,
+            cancelled: statusCounts["ملغي"] || 0,
+          },
+        };
+      })
+    );
+
+    return res.status(200).json({
+      count: companiesWithStats.length,
+      companies: companiesWithStats,
+      totals: companiesWithStats.reduce(
+        (acc, company) => {
+          acc.totalOrders += company.stats.totalOrders;
+          acc.pending += company.stats.pending;
+          acc.delivery += company.stats.delivery;
+          acc.completed += company.stats.completed;
+          acc.cancelled += company.stats.cancelled;
+          return acc;
+        },
+        { totalOrders: 0, pending: 0, delivery: 0, completed: 0, cancelled: 0 }
+      ),
+    });
+  } catch (error) {
+    console.error("❌ Error fetching delivery companies stats:", error.message);
     return res.status(500).json({ error: "Internal Server Error" });
   }
 });
