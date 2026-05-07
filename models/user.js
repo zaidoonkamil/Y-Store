@@ -71,6 +71,11 @@ const User = sequelize.define("User", {
         allowNull: false,
         defaultValue: false,
     },
+    isFeaturedSeller: {
+        type: DataTypes.BOOLEAN,
+        allowNull: false,
+        defaultValue: false,
+    },
     additionalVerificationType: {
         type: DataTypes.ENUM("none", "six_months", "yearly"),
         allowNull: false,

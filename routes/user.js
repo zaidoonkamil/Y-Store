@@ -77,6 +77,7 @@ function serializeUser(user) {
     role: user.role,
     isVerified: user.isVerified,
     storeActive: user.storeActive,
+    isFeaturedSeller: user.isFeaturedSeller,
     ...getAdditionalVerificationData(user),
     createdAt: user.createdAt,
     updatedAt: user.updatedAt,

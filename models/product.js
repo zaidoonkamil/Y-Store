@@ -32,6 +32,11 @@ const Product = sequelize.define("Product", {
     images: {
         type: DataTypes.JSON,
         allowNull: false,
+    },
+    isFeatured: {
+        type: DataTypes.BOOLEAN,
+        allowNull: false,
+        defaultValue: false,
     }
 }, {
     timestamps: true,

@@ -43,6 +43,33 @@ async function requireAdminOrAgent(req, res, next) {
   }
 }
 
+async function requireAdmin(req, res, next) {
+  try {
+    const token = req.headers.authorization;
+    if (!token) {
+      return res.status(401).json({ error: "Token is missing" });
+    }
+
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const user = await User.findByPk(decoded.id, {
+      attributes: ["id", "role"],
+    });
+
+    if (!user) {
+      return res.status(401).json({ error: "User not found" });
+    }
+
+    if (user.role !== "admin") {
+      return res.status(403).json({ error: "Only admin can perform this action" });
+    }
+
+    req.user = user;
+    return next();
+  } catch (error) {
+    return res.status(401).json({ error: "Invalid token" });
+  }
+}
+
 function normalizeDiscountInput(discountType, discountValue, basePrice) {
   const normalizedType = String(discountType || "none").trim();
   const numericValue = discountValue === undefined || discountValue === null || discountValue === ""
@@ -238,6 +265,41 @@ function pickBySubscriptionPriority(items, getOwnerId, subscriptionMap, limit = 
   return selected;
 }
 
+function orderBySubscriptionPriority(items, getOwnerId, subscriptionMap) {
+  const ordered = [];
+  const selectedIds = new Set();
+
+  for (const packageType of SUBSCRIPTION_PRIORITY) {
+    for (const item of items) {
+      const ownerId = getOwnerId(item);
+      if (subscriptionMap[ownerId]?.packageType !== packageType) continue;
+      if (selectedIds.has(item.id)) continue;
+      ordered.push(item);
+      selectedIds.add(item.id);
+    }
+  }
+
+  for (const item of items) {
+    if (selectedIds.has(item.id)) continue;
+    ordered.push(item);
+  }
+
+  return ordered;
+}
+
+function paginateArray(items, page, limit) {
+  const totalItems = items.length;
+  const totalPages = Math.max(1, Math.ceil(totalItems / limit));
+  const offset = (page - 1) * limit;
+
+  return {
+    totalItems,
+    totalPages,
+    currentPage: page,
+    products: items.slice(offset, offset + limit),
+  };
+}
+
 router.get("/search/products", async (req, res) => {
   try {
     const query = String(req.query.q || "").trim();
@@ -289,11 +351,13 @@ router.get("/search/products", async (req, res) => {
 
 router.get("/discover/top-selling", async (req, res) => {
   try {
+    const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || DISCOVERY_LIMIT, 1), 40);
     const subscriptionMap = await getActiveSubscriptionMap();
     const subscribedSellerIds = Object.keys(subscriptionMap).map(Number);
 
     if (subscribedSellerIds.length === 0) {
-      return res.status(200).json({ products: [] });
+      return res.status(200).json({ totalItems: 0, totalPages: 1, currentPage: page, products: [] });
     }
 
     const products = await Product.findAll({
@@ -327,15 +391,16 @@ router.get("/discover/top-selling", async (req, res) => {
       return soldB - soldA;
     });
 
-    const selectedProducts = pickBySubscriptionPriority(
+    const orderedProducts = orderBySubscriptionPriority(
       sortedProducts,
       (product) => product.userId,
-      subscriptionMap,
-      DISCOVERY_LIMIT
+      subscriptionMap
     );
+    const pageData = paginateArray(orderedProducts, page, limit);
 
     return res.status(200).json({
-      products: await enrichProducts(selectedProducts),
+      ...pageData,
+      products: await enrichProducts(pageData.products),
     });
   } catch (error) {
     console.error("❌ Error fetching top selling products:", error.message);
@@ -345,23 +410,25 @@ router.get("/discover/top-selling", async (req, res) => {
 
 router.get("/discover/cheapest", async (req, res) => {
   try {
+    const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || DISCOVERY_LIMIT, 1), 40);
     const products = await Product.findAll({
       include: [
         {
           model: User,
           as: "seller",
           attributes: ["id", "name", "phone", "location", "role", "isVerified", "image", "storeActive"],
+          where: { role: "agent", storeActive: true },
         },
       ],
       order: [["price", "ASC"]],
-      limit: 100,
     });
 
     const enrichedProducts = await enrichProducts(products);
     const sortedByFinalPrice = enrichedProducts.sort((a, b) => a.finalPrice - b.finalPrice);
-    const selectedProducts = shuffleArray(sortedByFinalPrice.slice(0, DISCOVERY_LIMIT));
+    const pageData = paginateArray(sortedByFinalPrice, page, limit);
 
-    return res.status(200).json({ products: selectedProducts });
+    return res.status(200).json(pageData);
   } catch (error) {
     console.error("❌ Error fetching cheapest products:", error.message);
     return res.status(500).json({ error: "Internal Server Error" });
@@ -400,48 +467,46 @@ router.get("/discover/discounted", async (req, res) => {
 
 router.get("/discover/featured-stores", async (req, res) => {
   try {
-    const subscriptionMap = await getActiveSubscriptionMap();
-    const subscribedSellerIds = Object.keys(subscriptionMap).map(Number);
-
-    if (subscribedSellerIds.length === 0) {
-      return res.status(200).json({ sellers: [] });
-    }
-
     const sellers = await User.findAll({
       where: {
-        id: {
-          [Op.in]: subscribedSellerIds,
-        },
         role: "agent",
         storeActive: true,
+        isFeaturedSeller: true,
       },
       order: [["createdAt", "DESC"]],
-      limit: 100,
     });
 
     const enrichedSellers = await enrichSellers(sellers);
-    const sortedSellers = [...enrichedSellers].sort((a, b) => {
-      if ((b.followersCount || 0) !== (a.followersCount || 0)) {
-        return (b.followersCount || 0) - (a.followersCount || 0);
-      }
-      if ((b.ratingAverage || 0) !== (a.ratingAverage || 0)) {
-        return (b.ratingAverage || 0) - (a.ratingAverage || 0);
-      }
-      return (b.ratingsCount || 0) - (a.ratingsCount || 0);
-    });
-
-    const selectedSellers = pickBySubscriptionPriority(
-      sortedSellers,
-      (seller) => seller.id,
-      subscriptionMap,
-      DISCOVERY_LIMIT
-    );
 
     return res.status(200).json({
-      sellers: shuffleArray(selectedSellers),
+      sellers: enrichedSellers,
     });
   } catch (error) {
     console.error("❌ Error fetching featured stores:", error.message);
+    return res.status(500).json({ error: "Internal Server Error" });
+  }
+});
+
+router.patch("/sellers/:sellerId/featured", requireAdmin, async (req, res) => {
+  try {
+    const seller = await User.findByPk(req.params.sellerId);
+    if (!seller || seller.role !== "agent") {
+      return res.status(404).json({ error: "التاجر غير موجود" });
+    }
+
+    const isFeaturedSeller =
+      req.body.isFeaturedSeller === undefined
+        ? !seller.isFeaturedSeller
+        : req.body.isFeaturedSeller === true || req.body.isFeaturedSeller === "true";
+
+    await seller.update({ isFeaturedSeller });
+
+    return res.status(200).json({
+      message: isFeaturedSeller ? "تمت إضافة التاجر للمميزين" : "تمت إزالة التاجر من المميزين",
+      seller,
+    });
+  } catch (error) {
+    console.error("❌ Error updating featured seller:", error.message);
     return res.status(500).json({ error: "Internal Server Error" });
   }
 });
@@ -628,6 +693,155 @@ router.patch("/sellers/:sellerId/products/discount", async (req, res) => {
   } catch (error) {
     console.error("❌ Error updating seller products discount:", error.message);
     return res.status(400).json({ error: error.message || "حدث خطأ أثناء تحديث الخصومات" });
+  }
+});
+
+router.get("/products/admin/all", requireAdmin, async (req, res) => {
+  try {
+    let { page, limit } = req.query;
+    page = parseInt(page, 10) || 1;
+    limit = Math.min(parseInt(limit, 10) || 20, 60);
+    const offset = (page - 1) * limit;
+
+    const { count, rows: products } = await Product.findAndCountAll({
+      include: [
+        {
+          model: User,
+          as: "seller",
+          attributes: [
+            "id",
+            "name",
+            "phone",
+            "location",
+            "role",
+            "isVerified",
+            "image",
+            "storeActive",
+            "isFeaturedSeller",
+          ],
+        },
+        {
+          model: Category,
+          as: "category",
+          required: false,
+          include: [
+            {
+              model: Category,
+              as: "parent",
+              required: false,
+              attributes: ["id", "name", "parentId", "images"],
+            },
+          ],
+        },
+      ],
+      limit,
+      offset,
+      order: [["updatedAt", "DESC"]],
+    });
+
+    return res.status(200).json({
+      totalItems: count,
+      totalPages: Math.max(1, Math.ceil(count / limit)),
+      currentPage: page,
+      products: await enrichProducts(products),
+    });
+  } catch (error) {
+    console.error("❌ Error fetching admin products:", error.message);
+    return res.status(500).json({ error: "Internal Server Error" });
+  }
+});
+
+router.get("/products/featured", async (req, res) => {
+  try {
+    let { page, limit, userId } = req.query;
+    page = parseInt(page, 10) || 1;
+    limit = Math.min(parseInt(limit, 10) || 20, 40);
+    userId = userId || 0;
+    const offset = (page - 1) * limit;
+
+    const { count, rows: products } = await Product.findAndCountAll({
+      where: { isFeatured: true },
+      include: [
+        {
+          model: User,
+          as: "seller",
+          attributes: ["id", "name", "phone", "location", "role", "isVerified", "image", "storeActive"],
+          where: { role: "agent", storeActive: true },
+        },
+        {
+          model: Category,
+          as: "category",
+          required: false,
+          include: [
+            {
+              model: Category,
+              as: "parent",
+              required: false,
+              attributes: ["id", "name", "parentId", "images"],
+            },
+          ],
+        },
+        {
+          model: User,
+          as: "favoritedByUsers",
+          where: { id: userId },
+          required: false,
+          attributes: ["id"],
+          through: { attributes: [] },
+        },
+      ],
+      limit,
+      offset,
+      order: [["updatedAt", "DESC"]],
+    });
+
+    const sellerIds = products.map((product) => product.seller?.id).filter(Boolean);
+    const followersCountMap = await getFollowersCountMap(sellerIds);
+    const ratingsSummaryMap = await getSellerRatingsSummaryMap(sellerIds);
+
+    const productsWithFavorite = products.map((product) => {
+      const isFavorite = product.favoritedByUsers && product.favoritedByUsers.length > 0;
+      const productJson = product.toJSON();
+      productJson.isFavorite = isFavorite;
+      delete productJson.favoritedByUsers;
+      return attachDiscountDetails(
+        attachRatingsToSeller(attachFollowersCountToSeller(productJson, followersCountMap), ratingsSummaryMap)
+      );
+    });
+
+    return res.status(200).json({
+      totalItems: count,
+      totalPages: Math.max(1, Math.ceil(count / limit)),
+      currentPage: page,
+      products: productsWithFavorite,
+    });
+  } catch (error) {
+    console.error("❌ Error fetching featured products:", error.message);
+    return res.status(500).json({ error: "Internal Server Error" });
+  }
+});
+
+router.patch("/products/:id/featured", requireAdmin, async (req, res) => {
+  try {
+    const product = await Product.findByPk(req.params.id);
+    if (!product) {
+      return res.status(404).json({ error: "المنتج غير موجود" });
+    }
+
+    const isFeatured =
+      req.body.isFeatured === undefined
+        ? !product.isFeatured
+        : req.body.isFeatured === true || req.body.isFeatured === "true";
+
+    await product.update({ isFeatured });
+
+    return res.status(200).json({
+      message: isFeatured ? "تمت إضافة المنتج للمميزين" : "تمت إزالة المنتج من المميزين",
+      product: attachDiscountDetails(product.toJSON()),
+    });
+  } catch (error) {
+    console.error("❌ Error updating featured product:", error.message);
+    return res.status(500).json({ error: "Internal Server Error" });
   }
 });
 
