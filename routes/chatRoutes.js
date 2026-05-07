@@ -79,8 +79,8 @@ function initChatSocket(io) {
         const fullMessage = await ChatMessage.findOne({
           where: { id: newMessage.id },
           include: [
-            { model: User, as: "sender", attributes: ["id", "name"] },
-            { model: User, as: "receiver", attributes: ["id", "name"] },
+            { model: User, as: "sender", attributes: ["id", "name", "role"] },
+            { model: User, as: "receiver", attributes: ["id", "name", "role"] },
           ],
         });
 
