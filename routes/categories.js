@@ -237,6 +237,61 @@ router.get("/categories/:id/products", async (req, res) => {
   }
 });
 
+router.patch("/categories/:id", upload.array("images", 5), async (req, res) => {
+  const { name } = req.body;
+
+  if (!name) {
+    return res.status(400).json({ error: "اسم القسم مطلوب" });
+  }
+
+  try {
+    const category = await Category.findByPk(req.params.id, {
+      include: [
+        {
+          model: Category,
+          as: "subcategories",
+          required: false,
+        },
+        {
+          model: Category,
+          as: "parent",
+          required: false,
+        },
+      ],
+    });
+
+    if (!category) {
+      return res.status(404).json({ error: "القسم غير موجود" });
+    }
+
+    const updateData = { name };
+    if (req.files && req.files.length > 0) {
+      updateData.images = req.files.map((file) => file.filename);
+    }
+
+    await category.update(updateData);
+    const updatedCategory = await Category.findByPk(req.params.id, {
+      include: [
+        {
+          model: Category,
+          as: "subcategories",
+          required: false,
+        },
+        {
+          model: Category,
+          as: "parent",
+          required: false,
+        },
+      ],
+    });
+
+    return res.status(200).json(formatCategoryTree(updatedCategory));
+  } catch (error) {
+    console.error("❌ Error updating category:", error.message);
+    return res.status(500).json({ error: "Internal Server Error" });
+  }
+});
+
 router.delete("/categories/:id", async (req, res) => {
   try {
     const category = await Category.findByPk(req.params.id, {
