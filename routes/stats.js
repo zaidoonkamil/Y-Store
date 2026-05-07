@@ -1,5 +1,6 @@
 const express = require("express");
-const { User, Order, Product } = require("../models");
+const { User, Order, Product, Category, AgentSubscription, AgentSubscriptionRequest } = require("../models");
+const Ads = require("../models/ads");
 const { Op } = require("sequelize");
 const router = express.Router();
 
@@ -13,6 +14,9 @@ router.get("/stats", async (req, res) => {
     startOfWeek.setHours(0, 0, 0, 0);
 
     const startOfMonth = new Date(today.getFullYear(), today.getMonth(), 1);
+    const now = new Date();
+    const expiringSoonDate = new Date();
+    expiringSoonDate.setDate(now.getDate() + 7);
 
     // ======= Users =======
     const [totalUsers, verifiedUsers, adminCount, agentCount, normalUsers,
@@ -61,6 +65,54 @@ router.get("/stats", async (req, res) => {
       }),
     ]);
 
+    const [
+      activeAgents,
+      inactiveAgents,
+      pendingSubscriptionRequests,
+      approvedSubscriptionRequests,
+      rejectedSubscriptionRequests,
+      activeSubscriptions,
+      expiredSubscriptions,
+      expiringSoonSubscriptions,
+      monthlySubscriptions,
+      semiannualSubscriptions,
+      yearlySubscriptions,
+      monthlyRequests,
+      semiannualRequests,
+      yearlyRequests,
+      totalCategories,
+      mainCategories,
+      subcategories,
+      totalAds,
+    ] = await Promise.all([
+      User.count({ where: { role: "agent", storeActive: true } }),
+      User.count({ where: { role: "agent", storeActive: false } }),
+      AgentSubscriptionRequest.count({ where: { status: "pending" } }),
+      AgentSubscriptionRequest.count({ where: { status: "approved" } }),
+      AgentSubscriptionRequest.count({ where: { status: "rejected" } }),
+      AgentSubscription.count({ where: { isActive: true, endsAt: { [Op.gt]: now } } }),
+      AgentSubscription.count({ where: { endsAt: { [Op.lte]: now } } }),
+      AgentSubscription.count({
+        where: {
+          isActive: true,
+          endsAt: {
+            [Op.gt]: now,
+            [Op.lte]: expiringSoonDate,
+          },
+        },
+      }),
+      AgentSubscription.count({ where: { isActive: true, endsAt: { [Op.gt]: now }, packageType: "monthly" } }),
+      AgentSubscription.count({ where: { isActive: true, endsAt: { [Op.gt]: now }, packageType: "semiannual" } }),
+      AgentSubscription.count({ where: { isActive: true, endsAt: { [Op.gt]: now }, packageType: "yearly" } }),
+      AgentSubscriptionRequest.count({ where: { requestedPackage: "monthly" } }),
+      AgentSubscriptionRequest.count({ where: { requestedPackage: "semiannual" } }),
+      AgentSubscriptionRequest.count({ where: { requestedPackage: "yearly" } }),
+      Category.count(),
+      Category.count({ where: { parentId: null } }),
+      Category.count({ where: { parentId: { [Op.ne]: null } } }),
+      Ads.count(),
+    ]);
+
     res.json({
       users: {
         total: totalUsers,
@@ -79,6 +131,42 @@ router.get("/stats", async (req, res) => {
         new: { today: newTodayProducts, thisWeek: newWeekProducts, thisMonth: newMonthProducts },
         byCategory: productsByCategory,
         topSellers: productsBySeller,
+      },
+      admin: {
+        sellers: {
+          total: agentCount,
+          active: activeAgents,
+          inactive: inactiveAgents,
+        },
+        subscriptionRequests: {
+          total: pendingSubscriptionRequests + approvedSubscriptionRequests + rejectedSubscriptionRequests,
+          pending: pendingSubscriptionRequests,
+          approved: approvedSubscriptionRequests,
+          rejected: rejectedSubscriptionRequests,
+          byPackage: {
+            monthly: monthlyRequests,
+            semiannual: semiannualRequests,
+            yearly: yearlyRequests,
+          },
+        },
+        subscriptions: {
+          active: activeSubscriptions,
+          expired: expiredSubscriptions,
+          expiringSoon: expiringSoonSubscriptions,
+          byPackage: {
+            monthly: monthlySubscriptions,
+            semiannual: semiannualSubscriptions,
+            yearly: yearlySubscriptions,
+          },
+        },
+        content: {
+          categories: {
+            total: totalCategories,
+            main: mainCategories,
+            sub: subcategories,
+          },
+          ads: totalAds,
+        },
       },
     });
   } catch (err) {
