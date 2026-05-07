@@ -1,0 +1,10 @@
+
+> start
+> node server.js
+
+◇ injected env (8) from .env // tip: ◈ secrets for agents [www.dotenvx.com]
+◇ injected env (0) from .env // tip: ⌘ suppress logs { quiet: true }
+Server running on http://localhost:1007
+✅ Connected to MySQL successfully!
+Database & tables synced!
+Reminder check completed: 0/0
