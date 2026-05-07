@@ -571,7 +571,9 @@ router.post("/login", upload.none(), async (req, res) => {
     if (!user.isVerified) {
       return res.status(403).json({
         error: "الحساب غير مفعل. يرجى تفعيل الحساب عبر كود واتساب أولاً",
+        code: "ACCOUNT_NOT_VERIFIED",
         isVerified: false,
+        phone: user.phone,
       });
     }
 
